@@ -1,92 +1,175 @@
-Olá\! Sou o Coolify, seu assistente especializado. Analisei seus arquivos `docker-compose.yaml` e `.env` com base na documentação oficial e tenho boas notícias: sua configuração está **muito bem estruturada e quase pronta para uso**, seguindo boas práticas tanto do Docker Compose quanto do Airflow.
+Olá. Eu sou **Airflow Maestro**. Analisei seus arquivos `docker-compose.yaml` e `.env` com base na documentação oficial do Apache Airflow (versão 2.9.0) e no contexto de uma instância **mínima** para desenvolvimento em PaaS (Coolify).
 
-No entanto, para garantir que tudo funcione perfeitamente dentro do ecossistema do Coolify, identifiquei alguns pontos de atenção e ajustes recomendados.
+Aqui está a análise técnica e as recomendações de otimização.
 
-### 1\. Variáveis Mágicas e FQDN (Ponto Crítico)
+### 1\. Análise Geral: Arquitetura vs. Objetivo
 
-Você utilizou corretamente a sintaxe das **Variáveis Mágicas** no seu `docker-compose.yaml` (`SERVICE_FQDN_AIRFLOW_APISERVER`), o que é excelente. Isso permite que o Coolify injete automaticamente a URL configurada para o serviço.
+Seu `docker-compose.yaml` atual está configurado com **`CeleryExecutor`**. Embora tecnicamente correto e robusto para produção, ele **não é uma instância mínima**.
 
-**O Problema:**
-No seu arquivo `.env`, você definiu manualmente um valor para essa variável:
+  * **O que você tem:** Uma arquitetura distribuída (Redis + Workers + Flower + Triggerer). Isso consome muitos recursos (RAM/CPU) desnecessários para um ambiente de desenvolvimento.
+  * **O que você precisa:** **`LocalExecutor`**.
 
-```bash
-SERVICE_FQDN_AIRFLOW_APISERVER = http://airflow-lkg08w4c4cwc84s0gs8g40kk.77.237.238.32.sslip.io
-```
+Para um ambiente de desenvolvimento ou pequena produção no Coolify, o `LocalExecutor` é superior pois:
 
-**A Recomendação:**
-No Coolify, você **não deve** definir o valor de `SERVICE_FQDN_...` manualmente no `.env` se quiser aproveitar a automação.
+1.  Executa tarefas no mesmo contêiner do Scheduler (ou processos subprocessos).
+2.  **Remove a necessidade do Redis.**
+3.  **Remove a necessidade de contêineres `airflow-worker` e `flower`.**
+4.  Mantém o paralelismo (você ainda pode rodar múltiplas tasks ao mesmo tempo).
 
-  * **Como corrigir:** Remova essa linha do seu `.env`.
-  * **Como funciona:** Quando você cria o recurso no Coolify e define um domínio na interface (por exemplo, `http://meu-airflow.com`), o Coolify preenche automaticamente essa variável (`SERVICE_FQDN_AIRFLOW_APISERVER`) dentro do container com o domínio correto configurado na UI. Hardcoded no `.env`, você perde essa flexibilidade dinâmica.
+### 2\. Verificação dos Arquivos
 
-### 2\. Exposição de Portas e Proxy
+#### Arquivo `.env`
 
-O Coolify usa um proxy reverso (Traefik, Caddy, etc.) para expor seus serviços. Para que o `airflow-apiserver` e o `flower` sejam acessíveis via domínio, o Coolify precisa saber quais portas eles estão escutando.
+  * **Status:** ✅ **Correto**.
+  * `AIRFLOW_UID=50000` é o padrão correto para a imagem oficial.
+  * A senha está definida corretamente.
 
-  * **Airflow Webserver:** O seu serviço `airflow-apiserver` usa a porta `8080` internamente.
-  * **Flower:** O serviço `flower` usa a porta `5555` internamente.
+#### Arquivo `docker-compose.yaml`
 
-O Coolify geralmente detecta portas expostas via `EXPOSE` no Dockerfile da imagem, mas é uma boa prática deixar isso explícito no `docker-compose.yaml` para evitar erros de "Bad Gateway".
+  * **Versões:** ✅ Imagens (Postgres 15, Redis 7.2, Airflow 2.9.0) são compatíveis.
+  * **Healthchecks:** ✅ Estão bem definidos.
+  * **Coolify/Expose:** ✅ O uso de `expose` está correto para o proxy interno do Coolify.
 
-**A Recomendação:**
-Adicione a seção `expose` (não `ports`, pois `ports` mapeia para o host, e queremos que passe pelo proxy do Coolify) nos serviços que terão domínio público:
+-----
+
+### 3\. Plano de Ação: Transformar em "Instância Mínima"
+
+Para economizar recursos no Coolify e simplificar a gestão, recomendo alterar para `LocalExecutor`.
+
+Abaixo, o código otimizado.
+
+#### Alterações Recomendadas:
+
+1.  Mudar `AIRFLOW__CORE__EXECUTOR` para `LocalExecutor`.
+2.  Remover serviços: `redis`, `flower`, `airflow-worker`.
+3.  Remover variáveis de ambiente referentes ao Celery.
+
+#### `docker-compose.yaml` Otimizado (LocalExecutor)
 
 ```yaml
-  airflow-apiserver:
+version: "3.8"
+
+x-airflow-common: &airflow-common
+  image: ${AIRFLOW_IMAGE_NAME:-apache/airflow:2.9.0}
+  environment: &airflow-common-env
+    # MUDANÇA CRÍTICA: Usar LocalExecutor para economizar recursos (sem Redis/Worker separado)
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__FERNET_KEY: ""
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__LOAD_EXAMPLES: "true"
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+    _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-}
+    # Variáveis Mágicas do Coolify
+    SERVICE_FQDN_AIRFLOW_APISERVER: ${SERVICE_FQDN_AIRFLOW_APISERVER}
+  volumes:
+    # No Coolify, certifique-se que o Build Context copia os DAGs ou use volumes persistentes se editar em produção
+    - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
+    - airflow-logs:/opt/airflow/logs
+    - ${AIRFLOW_PROJ_DIR:-.}/config:/opt/airflow/config
+    - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on: &airflow-common-depends-on
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+
+  # Webserver (Interface UI)
+  airflow-webserver:
     <<: *airflow-common
     command: webserver
     expose:
-      - "8080"  # Adicione isso para garantir que o Coolify detecte a porta
-    # ... resto da configuração
+      - "8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
 
-  flower:
+  # Scheduler (Responsável por agendar E executar as tasks no LocalExecutor)
+  airflow-scheduler:
     <<: *airflow-common
-    command: celery flower
-    expose:
-      - "5555" # Adicione isso
-    # ... resto da configuração
-```
+    command: scheduler
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
 
-### 3\. Persistência de Dados e Volumes (GitOps)
+  # Triggerer (Opcional: Apenas se usar Deferrable Operators. Se for muito minimalista, pode remover)
+  airflow-triggerer:
+    <<: *airflow-common
+    command: triggerer
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type TriggererJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
 
-Você está usando montagens de volume baseadas em diretório local (bind mounts), como:
-
-```yaml
-volumes:
-  - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
-```
-
-Isso funciona, mas no Coolify é importante entender o comportamento:
-
-  * **Base Directory:** O Coolify considera a raiz do seu repositório Git (ou o diretório base configurado) como o ponto de partida (`.`).
-  * **Deploy via Git:** Se você espera atualizar seus DAGs fazendo `git push`, essa configuração está **correta**. O Coolify vai baixar o novo código e montar a pasta `./dags` do repositório para dentro do container.
-  * **Persistência de Logs e Plugins:** Como as pastas `./logs` e `./plugins` também são bind mounts do repositório clonado, **os dados gerados ali (logs) podem ser perdidos** em novos deploys, pois o Coolify pode limpar o diretório de build.
-      * Se você precisa que os logs do Airflow persistam entre deploys, recomendo alterar para volumes nomeados do Docker, assim como você fez com o `postgres-db-volume`.
-
-**Exemplo de ajuste para Logs (Opcional, mas recomendado para produção):**
-
-```yaml
-services:
-  airflow-apiserver:
-    volumes:
-      - airflow-logs:/opt/airflow/logs
-      # ... outros volumes
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        if [[ -z "${AIRFLOW_UID}" ]]; then
+          export AIRFLOW_UID=50000
+        fi
+        mkdir -v -p /opt/airflow/{logs,dags,plugins,config}
+        chown -R "${AIRFLOW_UID}:0" /opt/airflow/{logs,dags,plugins,config}
+        echo "Executando migracoes..."
+        /entrypoint airflow version
+        /entrypoint airflow db migrate
+        /entrypoint airflow users create --username "${_AIRFLOW_WWW_USER_USERNAME:-admin}" --firstname "${_AIRFLOW_WWW_USER_FIRSTNAME:-Admin}" --lastname "${_AIRFLOW_WWW_USER_LASTNAME:-User}" --email "${_AIRFLOW_WWW_USER_EMAIL:-admin@example.com}" --role "Admin" --password "${_AIRFLOW_WWW_USER_PASSWORD:-airflow}"
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_MIGRATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME:-admin}
+      _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-airflow}
+    user: "0:0"
 
 volumes:
   postgres-db-volume:
-  airflow-logs: # Novo volume persistente
+  airflow-logs:
 ```
 
-### 4\. Healthchecks e Exclusão
+### Pontos de Atenção para o Coolify
 
-Seus healthchecks estão ótimos e bem detalhados. O Coolify respeita essas verificações para determinar se o deploy foi bem-sucedido.
+1.  **Volumes:** No Coolify, ao usar Docker Compose, o volume `${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags` dependerá de como você configurou a "Source". Se for um repositório Git, o Coolify clonará o repo e montará o diretório corretamente. Se você fizer upload manual do arquivo yaml, precisará garantir que os DAGs estejam dentro da imagem ou em um volume persistente configurado na UI do Coolify.
+2.  **Init Container:** Adicionei o comando explícito `airflow users create` no `airflow-init` para garantir a criação do usuário Admin, pois as variáveis de ambiente `_AIRFLOW_WWW_USER_CREATE` às vezes dependem do entrypoint padrão da imagem, que pode variar.
 
-  * **Dica:** Se algum serviço auxiliar (como o `airflow-init`) demorar muito e fizer o deploy falhar por timeout no Coolify, você pode usar a opção `exclude_from_hc: true` nesse serviço específico para que o Coolify não espere ele ficar "saudável" para considerar o deploy concluído. No seu caso, como o `airflow-init` roda e para (`service_completed_successfully`), o comportamento padrão deve funcionar bem.
-
-### Resumo das Ações
-
-1.  **Limpe o `.env`:** Remova `SERVICE_FQDN_AIRFLOW_APISERVER` para deixar o Coolify gerenciar o domínio.
-2.  **Adicione `expose`:** Garanta que `airflow-apiserver` tenha `expose: [8080]` e `flower` tenha `expose: [5555]`.
-3.  **Configure os Domínios na UI:** Após colar o Compose no Coolify, vá nas configurações de cada serviço (o Coolify vai analisá-los) e atribua os domínios desejados para a variável `SERVICE_FQDN...`.
-
-De resto, seu arquivo está **excelente**. A divisão de serviços, o uso de âncoras YAML (`&airflow-common`) e a configuração do Postgres 15 estão perfeitos. Pode seguir com o deploy\! 🚀
+Gostaria que eu explicasse como configurar as variáveis de ambiente no painel do Coolify para corresponder a este setup?
