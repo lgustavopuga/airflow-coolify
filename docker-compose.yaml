@@ -1,11 +1,8 @@
-# Modificado para Coolify
 version: '3.8'
 
-x-airflow-common:
-  &airflow-common
-  image: ${AIRFLOW_IMAGE_NAME:-apache/airflow:2.9.0} # Recomendado fixar uma versão estável
-  environment:
-    &airflow-common-env
+x-airflow-common: &airflow-common
+  image: ${AIRFLOW_IMAGE_NAME:-apache/airflow:2.9.0}
+  environment: &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: CeleryExecutor
     AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
@@ -18,14 +15,16 @@ x-airflow-common:
     AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
     _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-}
     AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'
+    # Variáveis Mágicas do Coolify
+    SERVICE_FQDN_AIRFLOW_APISERVER: ${SERVICE_FQDN_AIRFLOW_APISERVER}
+    SERVICE_FQDN_FLOWER: ${SERVICE_FQDN_FLOWER}
   volumes:
     - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
     - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
     - ${AIRFLOW_PROJ_DIR:-.}/config:/opt/airflow/config
     - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
   user: "${AIRFLOW_UID:-50000}:0"
-  depends_on:
-    &airflow-common-depends-on
+  depends_on: &airflow-common-depends-on
     redis:
       condition: service_healthy
     postgres:
@@ -61,12 +60,7 @@ services:
 
   airflow-apiserver:
     <<: *airflow-common
-    command: webserver # Nota: A imagem oficial usa 'webserver' para a UI, 'api-server' é para a nova API standalone
-    environment:
-      <<: *airflow-common-env
-      # Variável Mágica do Coolify para definir o domínio
-      # Configure o valor real (ex: https://airflow.seudominio.com) na UI do Coolify
-      - SERVICE_FQDN_AIRFLOW_APISERVER
+    command: webserver
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
       interval: 30s
@@ -173,10 +167,6 @@ services:
     command: celery flower
     profiles:
       - flower
-    # Variável Mágica do Coolify para definir o domínio do Flower (opcional)
-    environment:
-      <<: *airflow-common-env
-      - SERVICE_FQDN_FLOWER
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:5555/"]
       interval: 30s
