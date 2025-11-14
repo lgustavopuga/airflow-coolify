@@ -1,122 +1,93 @@
-version: "3.8"
+# ---
+# Versão "enxuta" do Docker Compose para Desenvolvimento Local
+# Foco: LocalExecutor + Postgres
+# ---
+version: "3.7"
 
 x-airflow-common: &airflow-common
-  image: ${AIRFLOW_IMAGE_NAME:-apache/airflow:2.9.0}
+  image: apache/airflow:2.9.2 # Use a versão desejada
   environment:
-    &airflow-common-env # MUDANÇA CRÍTICA: Usar LocalExecutor para economizar recursos (sem Redis/Worker separado)
-    AIRFLOW__CORE__EXECUTOR: LocalExecutor
-    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
-    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
-    AIRFLOW__CORE__FERNET_KEY: ""
-    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
-    AIRFLOW__CORE__LOAD_EXAMPLES: "true"
-    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
-    _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-}
-    # Variáveis Mágicas do Coolify
-    SERVICE_FQDN_AIRFLOW_APISERVER: ${SERVICE_FQDN_AIRFLOW_APISERVER}
+    - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+    - AIRFLOW__CORE__LOAD_EXAMPLES=True
+    - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=True
+    - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+    # Descomente a linha abaixo se precisar de acesso ao Docker-in-Docker (ex: DockerOperator)
+    # - AIRFLOW__DOCKER__HOST=unix://var/run/docker.sock
   volumes:
-    # No Coolify, certifique-se que o Build Context copia os DAGs ou use volumes persistentes se editar em produção
-    - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
-    - airflow-logs:/opt/airflow/logs
-    - ${AIRFLOW_PROJ_DIR:-.}/config:/opt/airflow/config
-    - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
-  user: "${AIRFLOW_UID:-50000}:0"
-  depends_on: &airflow-common-depends-on
-    postgres:
-      condition: service_healthy
+    - ./dags:/opt/airflow/dags
+    - ./logs:/opt/airflow/logs
+    - ./plugins:/opt/airflow/plugins
+    # Descomente a linha abaixo se precisar de acesso ao Docker-in-Docker (ex: DockerOperator)
+    # - /var/run/docker.sock:/var/run/docker.sock
+  user: "${AIRFLOW_UID:-50000}:0" # Usa o UID do host ou 50000 como fallback
+  depends_on:
+    - postgres
 
 services:
   postgres:
-    image: postgres:15
+    image: postgres:16
+    container_name: airflow-postgres
     environment:
-      POSTGRES_USER: airflow
-      POSTGRES_PASSWORD: airflow
-      POSTGRES_DB: airflow
+      - POSTGRES_USER=airflow
+      - POSTGRES_PASSWORD=airflow
+      - POSTGRES_DB=airflow
     volumes:
       - postgres-db-volume:/var/lib/postgresql/data
+    ports:
+      - "5432:5432" # Expõe o Postgres para a máquina host (opcional, bom para debug)
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "airflow"]
-      interval: 10s
+      interval: 5s
+      timeout: 5s
       retries: 5
-      start_period: 5s
     restart: always
 
-  # Webserver (Interface UI)
   airflow-webserver:
     <<: *airflow-common
+    container_name: airflow-webserver
     command: webserver
-    expose:
-      - "8080"
+    ports:
+      - "8080:8080"
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
-      interval: 30s
+      interval: 10s
       timeout: 10s
       retries: 5
-      start_period: 30s
     restart: always
     depends_on:
-      <<: *airflow-common-depends-on
-      airflow-init:
-        condition: service_completed_successfully
+      - postgres
+      - airflow-init
 
-  # Scheduler (Responsável por agendar E executar as tasks no LocalExecutor)
   airflow-scheduler:
     <<: *airflow-common
+    container_name: airflow-scheduler
     command: scheduler
-    healthcheck:
-      test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 30s
-    restart: always
-    depends_on:
-      <<: *airflow-common-depends-on
-      airflow-init:
-        condition: service_completed_successfully
-
-  # Triggerer (Opcional: Apenas se usar Deferrable Operators. Se for muito minimalista, pode remover)
-  airflow-triggerer:
-    <<: *airflow-common
-    command: triggerer
     healthcheck:
       test:
         [
           "CMD-SHELL",
-          'airflow jobs check --job-type TriggererJob --hostname "$${HOSTNAME}"',
+          "airflow jobs check --job-type SchedulerJob --hostname $(hostname) --limit 1",
         ]
-      interval: 30s
+      interval: 10s
       timeout: 10s
       retries: 5
-      start_period: 30s
     restart: always
     depends_on:
-      <<: *airflow-common-depends-on
-      airflow-init:
-        condition: service_completed_successfully
+      - postgres
+      - airflow-init
 
   airflow-init:
     <<: *airflow-common
-    entrypoint: /bin/bash
+    container_name: airflow-init
+    entrypoint: /bin/sh
     command:
       - -c
       - |
-        if [[ -z "${AIRFLOW_UID}" ]]; then
-          export AIRFLOW_UID=50000
-        fi
-        mkdir -v -p /opt/airflow/{logs,dags,plugins,config}
-        chown -R "${AIRFLOW_UID}:0" /opt/airflow/{logs,dags,plugins,config}
-        echo "Executando migracoes..."
-        /entrypoint airflow version
-        /entrypoint airflow db migrate
-        /entrypoint airflow users create --username "${_AIRFLOW_WWW_USER_USERNAME:-admin}" --firstname "${_AIRFLOW_WWW_USER_FIRSTNAME:-Admin}" --lastname "${_AIRFLOW_WWW_USER_LASTNAME:-User}" --email "${_AIRFLOW_WWW_USER_EMAIL:-admin@example.com}" --role "Admin" --password "${_AIRFLOW_WWW_USER_PASSWORD:-airflow}"
-    environment:
-      <<: *airflow-common-env
-      _AIRFLOW_DB_MIGRATE: "true"
-      _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME:-admin}
-      _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-airflow}
-    user: "0:0"
+        # Apenas 'db upgrade' e 'users create'. O 'connections add' e 'pools import' são opcionais.
+        airflow db upgrade
+        airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com
+    restart: on-failure
 
 volumes:
   postgres-db-volume:
-  airflow-logs:
+    driver: local
