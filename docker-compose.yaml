@@ -33,8 +33,6 @@ services:
       - POSTGRES_DB=airflow
     volumes:
       - postgres-db-volume:/var/lib/postgresql/data
-    ports:
-      - "5432:5432" # Expõe o Postgres para a máquina host (opcional, bom para debug)
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "airflow"]
       interval: 5s
@@ -83,7 +81,7 @@ services:
       - |
         # Apenas 'db upgrade' e 'users create'. O 'connections add' e 'pools import' são opcionais.
         airflow db upgrade
-        airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com
+        airflow users create --username ${AIRFLOW_USER:-admin} --password ${AIRFLOW_PASS:-admin} --lastname User --role Admin --email admin@example.com
     restart: on-failure
 
 volumes:
