@@ -1,0 +1,31 @@
+services:
+  postgres:
+    image: postgres:13
+    environment:
+      - POSTGRES_USER=airflow
+      - POSTGRES_PASSWORD=airflow
+      - POSTGRES_DB=airflow
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+
+  airflow:
+    image: apache/airflow:latest
+    # Inicializa o DB se necessário e roda webserver e scheduler juntos (bash trick para dev)
+    command: bash -c "airflow db migrate && airflow users create --username admin --firstname Peter --lastname Parker --role Admin --email spiderman@superhero.org --password admin || true && (airflow scheduler & airflow webserver)"
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres/airflow
+      - AIRFLOW__CORE__LOAD_EXAMPLES=false
+    volumes:
+      - airflow_data:/opt/airflow
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  airflow_data:
